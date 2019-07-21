@@ -263,22 +263,24 @@ format_error(Err) ->
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
-init([Mod, {SockMod, Socket}, Opts]) ->
+init([Mod, SockMod, Opts]) ->
     Time = p1_time_compat:monotonic_time(milli_seconds),
     Timeout = timer:seconds(30),
     State = #{owner => self(),
 	      mod => Mod,
-	      socket => Socket,
 	      socket_mod => SockMod,
 	      socket_opts => Opts,
 	      stream_timeout => {Timeout, Time},
 	      stream_state => accepting},
+    accept(self()),
     {ok, State, Timeout}.
 
 -spec handle_cast(term(), state()) -> next_state().
-handle_cast(accept, #{socket := Socket,
-		      socket_mod := SockMod,
-		      socket_opts := Opts} = State) ->
+handle_cast(accept, #{mod := Mod,
+                      socket_mod := SockMod,
+                      socket_opts := Opts} = StateE) ->
+    {ok, Socket} = ranch:handshake(Mod),
+    State = StateE#{socket => Socket},
     XMPPSocket = xmpp_socket:new(SockMod, Socket, Opts),
     SocketMonitor = xmpp_socket:monitor(XMPPSocket),
     case xmpp_socket:peername(XMPPSocket) of
@@ -425,7 +427,6 @@ handle_info({tcp, _, Data}, #{socket := Socket} = State) ->
 	  {error, Reason} when is_atom(Reason) ->
 	      process_stream_end({socket, Reason}, State);
 	  {error, Reason} ->
-	      %% TODO: make fast_tls return atoms
 	      process_stream_end({tls, Reason}, State)
       end);
 handle_info({tcp_closed, _}, State) ->

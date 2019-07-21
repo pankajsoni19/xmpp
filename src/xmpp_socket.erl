@@ -154,7 +154,7 @@ compress(SocketData) -> compress(SocketData, undefined).
 
 compress(#socket_state{sockmod = SockMod,
 		       socket = Socket} = SocketData, Data)
-  when SockMod == gen_tcp orelse SockMod == fast_tls ->
+  when SockMod == ranch_tcp orelse SockMod == ranch_ssl ->
     {ok, ZlibSocket} = ezlib:enable_zlib(SockMod, Socket),
     case Data of
 	undefined -> ok;
@@ -289,10 +289,14 @@ get_sockmod(SocketData) ->
 get_transport(#socket_state{sockmod = SockMod,
 			    socket = Socket}) ->
     case SockMod of
+        ranch_tcp -> tcp;
+        ranch_ssl -> tls;
 	gen_tcp -> tcp;
 	fast_tls -> tls;
 	ezlib ->
 	    case ezlib:get_sockmod(Socket) of
+                ranch_tcp -> tcp_zlib;
+                ranch_ssl -> tls_zlib;
 		gen_tcp -> tcp_zlib;
 		fast_tls -> tls_zlib
 	    end;
@@ -301,6 +305,8 @@ get_transport(#socket_state{sockmod = SockMod,
 
 get_owner(SockMod, _) when SockMod == gen_tcp orelse
 			   SockMod == fast_tls orelse
+                           SockMod == ranch_tcp orelse
+                           SockMod == ranch_ssl orelse
 			   SockMod == ezlib ->
     self();
 get_owner(SockMod, Socket) ->
@@ -344,6 +350,7 @@ peername(#socket_state{sockmod = SockMod,
     end.
 
 activate(#socket_state{sockmod = SockMod, socket = Socket}) ->
+    io:format("making active: ~p~n", [{SockMod, Socket}]),
     case SockMod of
 	gen_tcp -> inet:setopts(Socket, [{active, once}]);
 	_ -> SockMod:setopts(Socket, [{active, once}])

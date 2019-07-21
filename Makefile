@@ -1,68 +1,37 @@
-REBAR=./rebar
-ERL=erl
+IGNORE_DEPS += edown eper eunit_formatters meck node_package rebar_lock_deps_plugin rebar_vsn_plugin reltool_util
+C_SRC_DIR = /path/do/not/exist
+C_SRC_TYPE = rebar
+DRV_CFLAGS = -fPIC
+export DRV_CFLAGS
+ERLANG_ARCH = 64
+export ERLANG_ARCH
+ERLC_OPTS = +debug_info
+export ERLC_OPTS
+ERLC_OPTS += -I include
+ERLC_OPTS += -I ../fast_xml/include
+ERLC_OPTS += -I deps/fast_xml/include
 
-all: src
+DEPS += p1_utils
+dep_p1_utils = git https://github.com/processone/p1_utils 1.0.15
+DEPS += fast_xml
+dep_fast_xml = git https://github.com/processone/fast_xml cfe69e3
+DEPS += fast_tls
+dep_fast_tls = git https://github.com/processone/fast_tls 1.1.1
+DEPS += ezlib
+dep_ezlib = git https://github.com/processone/ezlib 1.0.6
+DEPS += stringprep
+dep_stringprep = git https://github.com/processone/stringprep 1.0.16
 
-src:
-	$(REBAR) get-deps compile
 
-spec: src/xmpp_codec.erl include/xmpp_codec.hrl deps/fast_xml/ebin/fxml_gen.beam
-	$(ERL) -noinput +B -pa ebin -pa deps/*/ebin -eval \
-	'case fxml_gen:compile("specs/xmpp_codec.spec", [{add_type_specs, xmpp_element}, {erl_dir, "src"}, {hrl_dir, "include"}]) of ok -> halt(0); _ -> halt(1) end.'
+rebar_dep: preprocess pre-deps deps pre-app app
 
-xdata: ebin/xdata_codec.beam
-	$(ERL) -noinput +B -pa ebin -pa deps/*/ebin -eval \
-	'case xdata_codec:compile("specs", [{erl_dir, "src"}, {hrl_dir, "include"}]) of ok -> halt(0); _ -> halt(1) end.'
+preprocess::
 
-clean:
-	$(REBAR) clean
-	rm -rf deps
-	rm -rf ebin
+pre-deps::
 
-xref: all
-	$(REBAR) skip_deps=true xref
+pre-app::
 
-deps := $(wildcard deps/*/ebin)
+pre-app::
+	@$(MAKE) --no-print-directory -f c_src/Makefile.erlang.mk
 
-dialyzer/erlang.plt:
-	@mkdir -p dialyzer
-	@dialyzer --build_plt --output_plt dialyzer/erlang.plt \
-	-o dialyzer/erlang.log --apps kernel stdlib sasl erts syntax_tools compiler asn1 crypto; \
-	status=$$? ; if [ $$status -ne 2 ]; then exit $$status; else exit 0; fi
-
-dialyzer/deps.plt:
-	@mkdir -p dialyzer
-	@dialyzer --build_plt --output_plt dialyzer/deps.plt \
-	-o dialyzer/deps.log $(deps); \
-	status=$$? ; if [ $$status -ne 2 ]; then exit $$status; else exit 0; fi
-
-dialyzer/xmpp.plt:
-	@mkdir -p dialyzer
-	@dialyzer --build_plt --output_plt dialyzer/xmpp.plt \
-	-o dialyzer/xmpp.log ebin; \
-	status=$$? ; if [ $$status -ne 2 ]; then exit $$status; else exit 0; fi
-
-erlang_plt: dialyzer/erlang.plt
-	@dialyzer --plt dialyzer/erlang.plt --check_plt -o dialyzer/erlang.log; \
-	status=$$? ; if [ $$status -ne 2 ]; then exit $$status; else exit 0; fi
-
-deps_plt: dialyzer/deps.plt
-	@dialyzer --plt dialyzer/deps.plt --check_plt -o dialyzer/deps.log; \
-	status=$$? ; if [ $$status -ne 2 ]; then exit $$status; else exit 0; fi
-
-xmpp_plt: dialyzer/xmpp.plt
-	@dialyzer --plt dialyzer/xmpp.plt --check_plt -o dialyzer/xmpp.log; \
-	status=$$? ; if [ $$status -ne 2 ]; then exit $$status; else exit 0; fi
-
-dialyzer: erlang_plt deps_plt xmpp_plt
-	@dialyzer --plts dialyzer/*.plt --no_check_plt \
-	--get_warnings -o dialyzer/error.log ebin; \
-	status=$$? ; if [ $$status -ne 2 ]; then exit $$status; else exit 0; fi
-
-deps/fast_xml/ebin/fxml_gen.beam:
-	$(REBAR) get-deps compile
-
-ebin/xdata_codec.beam:
-	$(REBAR) get-deps compile
-
-.PHONY: clean src all spec xdata dialyzer erlang_plt deps_plt xmpp_plt
+include $(if $(ERLANG_MK_FILENAME),$(ERLANG_MK_FILENAME),erlang.mk)
