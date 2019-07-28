@@ -37,6 +37,7 @@ mech_new(_Host, _GetPassword, CheckPassword, _CheckPasswordDigest) ->
     #state{check_password = CheckPassword}.
 
 mech_step(State, ClientIn) ->
+    io:format("mechstep ~p~n", [prepare(ClientIn)]),
     case prepare(ClientIn) of
 	{AuthzId, User, Password} ->
 	    case (State#state.check_password)(User, AuthzId, Password) of

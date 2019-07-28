@@ -31,7 +31,7 @@ fqdn(_) ->
 
 -spec debug(any()) -> {ok, boolean()}.
 debug(_) ->
-    {ok, false}.
+    {ok, true}.
 
 %%%===================================================================
 %%% Internal functions

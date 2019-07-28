@@ -279,7 +279,12 @@ init([Mod, SockMod, Opts]) ->
 handle_cast(accept, #{mod := Mod,
                       socket_mod := SockMod,
                       socket_opts := Opts} = StateE) ->
-    {ok, Socket} = ranch:handshake(Mod),
+    {ok, Socket} =
+        if (SockMod == ranch_tcp) orelse (SockMod == ranch_ssl) ->
+               ranch:handshake(Mod);
+           true ->
+               SockMod:handshake()
+        end,
     State = StateE#{socket => Socket},
     XMPPSocket = xmpp_socket:new(SockMod, Socket, Opts),
     SocketMonitor = xmpp_socket:monitor(XMPPSocket),

@@ -207,7 +207,6 @@ send_trailer(SocketData) ->
 
 -spec send_ws_ping(socket_state()) -> ok | {error, inet:posix()}.
 send_ws_ping(#socket_state{xml_stream = undefined}) ->
-    % we don't send cdata on xmlsockets
     ok;
 send_ws_ping(SocketData) ->
     send(SocketData, <<"\r\n\r\n">>).
@@ -350,7 +349,6 @@ peername(#socket_state{sockmod = SockMod,
     end.
 
 activate(#socket_state{sockmod = SockMod, socket = Socket}) ->
-    io:format("making active: ~p~n", [{SockMod, Socket}]),
     case SockMod of
 	gen_tcp -> inet:setopts(Socket, [{active, once}]);
 	_ -> SockMod:setopts(Socket, [{active, once}])
