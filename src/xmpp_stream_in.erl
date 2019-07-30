@@ -467,14 +467,13 @@ code_change(OldVsn, State, Extra) ->
 %%%===================================================================
 -spec init_state(state(), [proplists:property()]) -> state().
 init_state(#{socket := Socket, mod := Mod} = State, Opts) ->
-    Encrypted = proplists:get_bool(tls, Opts),
     State1 = State#{stream_direction => in,
 		    stream_id => xmpp_stream:new_id(),
 		    stream_state => wait_for_stream,
 		    stream_header_sent => false,
 		    stream_restarted => false,
 		    stream_compressed => false,
-		    stream_encrypted => Encrypted,
+		    stream_encrypted => false,
 		    stream_version => {1,0},
 		    stream_authenticated => false,
 		    codec_options => [ignore_els],
@@ -487,18 +486,8 @@ init_state(#{socket := Socket, mod := Mod} = State, Opts) ->
     case try Mod:init([State1, Opts])
 	 catch _:undef -> {ok, State1}
 	 end of
-	{ok, State2} when not Encrypted ->
+	{ok, State2} ->
 	    State2;
-	{ok, State2} when Encrypted ->
-	    TLSOpts = try callback(tls_options, State2)
-		      catch _:{?MODULE, undef} -> []
-		      end,
-	    case xmpp_socket:starttls(Socket, TLSOpts) of
-		{ok, TLSSocket} ->
-		    State2#{socket => TLSSocket};
-		{error, Reason} ->
-		    process_stream_end({tls, Reason}, State2)
-	    end;
 	{error, Reason} ->
 	    process_stream_end(Reason, State1);
 	ignore ->
@@ -963,16 +952,12 @@ process_sasl_abort(State) ->
     process_sasl_failure(aborted, <<"">>, State).
 
 -spec send_features(state()) -> state().
-send_features(#{stream_version := {1,0},
-		stream_encrypted := Encrypted} = State) ->
-    TLSRequired = is_starttls_required(State),
-    Features = if TLSRequired and not Encrypted ->
-		       get_tls_feature(State);
-		  true ->
-		       get_sasl_feature(State) ++ get_compress_feature(State)
-			   ++ get_tls_feature(State) ++ get_bind_feature(State)
-			   ++ get_session_feature(State) ++ get_other_features(State)
-	       end,
+send_features(#{stream_version := {1,0} } = State) ->
+    Features = get_sasl_feature(State)
+                ++ get_compress_feature(State) 
+                ++ get_bind_feature(State)
+                ++ get_session_feature(State) 
+                ++ get_other_features(State),
     send_pkt(State, #stream_features{sub_els = Features});
 send_features(State) ->
     %% clients and servers from stone age
@@ -1003,28 +988,13 @@ check_password_digest_fun(Mech, State) ->
     end.
 
 -spec get_sasl_mechanisms(state()) -> [xmpp_sasl:mechanism()].
-get_sasl_mechanisms(#{stream_encrypted := Encrypted,
-		      xmlns := NS} = State) ->
-    Mechs = if NS == ?NS_CLIENT -> xmpp_sasl:listmech();
-	       true -> []
-	    end,
-    Mechs1 = if Encrypted -> [<<"EXTERNAL">>|Mechs];
-		true -> Mechs
-	     end,
-    try callback(sasl_mechanisms, Mechs1, State)
-    catch _:{?MODULE, undef} -> Mechs1
-    end.
+get_sasl_mechanisms(_) -> 
+    [<<"PLAIN">>].
 
 -spec get_sasl_feature(state()) -> [sasl_mechanisms()].
-get_sasl_feature(#{stream_authenticated := false,
-		   stream_encrypted := Encrypted} = State) ->
-    TLSRequired = is_starttls_required(State),
-    if Encrypted or not TLSRequired ->
-	    Mechs = get_sasl_mechanisms(State),
-	    [#sasl_mechanisms{list = Mechs}];
-       true ->
-	    []
-    end;
+get_sasl_feature(#{stream_authenticated := false} = State) ->
+    Mechs = get_sasl_mechanisms(State),
+    [#sasl_mechanisms{list = Mechs}];
 get_sasl_feature(_) ->
     [].
 
@@ -1038,19 +1008,6 @@ get_compress_feature(#{stream_compressed := false,
 	    []
     end;
 get_compress_feature(_) ->
-    [].
-
--spec get_tls_feature(state()) -> [starttls()].
-get_tls_feature(#{stream_authenticated := false,
-		  stream_encrypted := false} = State) ->
-    case is_starttls_available(State) of
-	true ->
-	    TLSRequired = is_starttls_required(State),
-	    [#starttls{required = TLSRequired}];
-	false ->
-	    []
-    end;
-get_tls_feature(_) ->
     [].
 
 -spec get_bind_feature(state()) -> [bind()].
@@ -1086,10 +1043,7 @@ is_starttls_available(State) ->
     end.
 
 -spec is_starttls_required(state()) -> boolean().
-is_starttls_required(State) ->
-    try callback(tls_required, State)
-    catch _:{?MODULE, undef} -> false
-    end.
+is_starttls_required(_State) -> false.
 
 -spec set_from_to(xmpp_element(), state()) -> {ok, xmpp_element()} |
 					      {error, stream_error()}.
