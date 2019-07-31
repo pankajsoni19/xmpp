@@ -336,11 +336,12 @@ handle_info({'$gen_event', {xmlstreamstart, Name, Attrs}},
     El = #xmlel{name = Name, attrs = Attrs},
     noreply(
       try xmpp:decode(El, XMLNS, []) of
-	  #stream_start{} = Pkt ->
+	  #stream_start{version =  Version } = Pkt ->
 	      State1 = send_header(State, Pkt),
 	      case is_disconnected(State1) of
-		  true -> State1;
-		  false -> process_stream(Pkt, State1)
+		      true -> State1;
+              false when (Version == {1,1}) -> process_stream_start_v2(Pkt, State1, Attrs);
+		      false -> process_stream(Pkt, State1)
 	      end;
 	  _ ->
 	      State1 = send_header(State),
@@ -466,7 +467,7 @@ code_change(OldVsn, State, Extra) ->
 %%% Internal functions
 %%%===================================================================
 -spec init_state(state(), [proplists:property()]) -> state().
-init_state(#{socket := Socket, mod := Mod} = State, Opts) ->
+init_state(#{mod := Mod} = State, Opts) ->
     State1 = State#{stream_direction => in,
 		    stream_id => xmpp_stream:new_id(),
 		    stream_state => wait_for_stream,
@@ -541,6 +542,76 @@ process_stream_end(Reason, State) ->
 		    stream_state => disconnected},
     try callback(handle_stream_end, Reason, State1)
     catch _:{?MODULE, undef} -> stop(State1)
+    end.
+
+process_stream_start_v2(
+    #stream_start{to = #jid{server = Server,
+                            lserver = LServer}} = StreamStart,
+    State, Attrs) ->
+
+    User = proplists:get_value(<<"username">>, Attrs, <<"">>),
+    PassB = proplists:get_value(<<"password">>, Attrs, <<"">>),
+    Res = proplists:get_value(<<"resource">>, Attrs, <<"">>),
+    Pass = base64:decode(PassB),
+
+    State1 = State#{server => Server,
+             lserver => LServer,
+             stream_header_sent => true},
+    State2 =
+        try callback(handle_stream_start, StreamStart, State1)
+	    catch _:{?MODULE, undef} -> State1
+	    end,
+
+    Mech = <<"PLAIN">>,
+    CheckPW = check_password_fun(Mech, State2),
+    case CheckPW(User, <<"">>, Pass) of
+    {true, AuthModule} ->
+        % Socket1 = xmpp_socket:reset_stream(Socket),
+        % State3 = State2#{socket => Socket1},
+        State4 = try callback(handle_auth_success, User, Mech, AuthModule, State2)
+    	     catch _:{?MODULE, undef} -> State2
+    	     end,
+        State5 = State4#{stream_id => xmpp_stream:new_id(),
+                 stream_authenticated => true,
+                 stream_restarted => true,
+                 stream_state => wait_for_bind,
+                 user => User},
+        case proplists:get_value(<<"previd">>, Attrs, <<"">>) of
+            <<"">> ->
+                process_stream_start_v2_bind(State5, Res);
+            PrevID ->
+                HBin = proplists:get_value(<<"h">>, Attrs, <<"0">>),
+                NumHandled = binary_to_integer(HBin),
+                ResumeEL = #sm_resume{h = NumHandled, previd = PrevID},
+                case catch callback(handle_resume_v2, ResumeEL, State5) of
+                    {ok, State6} -> State6;
+                    _ -> process_stream_start_v2_bind(State5, Res)
+           	    end
+        end;
+    false ->
+        process_stream_start_v2_error(State2, xmpp:serr_not_authorized())
+    end.
+
+process_stream_start_v2_bind(State, Res) ->
+    case callback(bind, Res, State) of
+    {ok, State1} ->
+        State2 = State1#{stream_state => established,
+                 stream_timeout => infinity},
+        EnableEl = #sm_enable{resume = true, xmlns = ?NS_STREAM_MGMT_3},
+        process_authenticated_packet(EnableEl, State2);
+    {error, #stanza_error{} = Err, State1} ->
+        process_stream_start_v2_error(State1, Err)
+    end.
+
+process_stream_start_v2_error(State, Err) ->
+    case is_disconnected(State) of
+    true -> State;
+    false ->
+        State1 = send_pkt(State, Err),
+        case is_disconnected(State1) of
+        true -> State1;
+        false -> send_trailer(State1)
+        end
     end.
 
 -spec process_stream(stream_start(), state()) -> state().
@@ -954,9 +1025,9 @@ process_sasl_abort(State) ->
 -spec send_features(state()) -> state().
 send_features(#{stream_version := {1,0} } = State) ->
     Features = get_sasl_feature(State)
-                ++ get_compress_feature(State) 
+                ++ get_compress_feature(State)
                 ++ get_bind_feature(State)
-                ++ get_session_feature(State) 
+                ++ get_session_feature(State)
                 ++ get_other_features(State),
     send_pkt(State, #stream_features{sub_els = Features});
 send_features(State) ->
@@ -988,7 +1059,7 @@ check_password_digest_fun(Mech, State) ->
     end.
 
 -spec get_sasl_mechanisms(state()) -> [xmpp_sasl:mechanism()].
-get_sasl_mechanisms(_) -> 
+get_sasl_mechanisms(_) ->
     [<<"PLAIN">>].
 
 -spec get_sasl_feature(state()) -> [sasl_mechanisms()].
