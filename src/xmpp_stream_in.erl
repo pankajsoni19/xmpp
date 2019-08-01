@@ -552,7 +552,6 @@ process_stream_start_v2(
 
     User = proplists:get_value(<<"username">>, Attrs, <<"">>),
     PassB = proplists:get_value(<<"password">>, Attrs, <<"">>),
-    Res = proplists:get_value(<<"resource">>, Attrs, <<"">>),
     Pass = base64:decode(PassB),
 
     State1 = State#{server => Server,
@@ -579,35 +578,41 @@ process_stream_start_v2(
                  user => User},
         case proplists:get_value(<<"previd">>, Attrs, <<"">>) of
             <<"">> ->
-                process_stream_start_v2_bind(State5, Res);
+                process_stream_start_v2_bind(State5, Attrs);
             PrevID ->
                 HBin = proplists:get_value(<<"h">>, Attrs, <<"0">>),
                 NumHandled = binary_to_integer(HBin),
                 ResumeEL = #sm_resume{h = NumHandled, previd = PrevID},
                 case catch callback(handle_resume_v2, ResumeEL, State5) of
                     {ok, State6} -> State6;
-                    _ -> process_stream_start_v2_bind(State5, Res)
+                    _ -> process_stream_start_v2_bind(State5, Attrs)
            	    end
         end;
     false ->
         process_stream_start_v2_error(State2, xmpp:serr_not_authorized())
     end.
 
-process_stream_start_v2_bind(State, Res) ->
+process_stream_start_v2_bind(State, Attrs) ->
+    Res = proplists:get_value(<<"resource">>, Attrs, <<"">>),
     case callback(bind, Res, State) of
     {ok, State1} ->
         State2 = State1#{stream_state => established,
                  stream_timeout => infinity},
         EnableEl = #sm_enable{resume = true, xmlns = ?NS_STREAM_MGMT_3},
         State3 = process_authenticated_packet(EnableEl, State2),
-        #{jid := JID, lang := Lang} = State3,
-        PresenceEl =
-            #presence{id = <<>>, type = available, lang = Lang,
-                      from = JID, to = jid:remove_resource(JID),
-                      show = undefined, status = [], priority = 5,
-                      sub_els = [],
-                      meta = #{}},
-        process_authenticated_packet(PresenceEl, State3);
+        case proplists:get_value(<<"presence">>, Attrs, <<"true">>) of
+            <<"true">> ->
+                #{jid := JID, lang := Lang} = State3,
+                PresenceEl =
+                    #presence{id = <<>>, type = available, lang = Lang,
+                              from = JID, to = jid:remove_resource(JID),
+                              show = undefined, status = [], priority = 5,
+                              sub_els = [],
+                              meta = #{}},
+                process_authenticated_packet(PresenceEl, State3);
+            _ ->
+                State3
+        end;
     {error, #stanza_error{} = Err, State1} ->
         process_stream_start_v2_error(State1, Err)
     end.
