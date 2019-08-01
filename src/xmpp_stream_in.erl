@@ -336,13 +336,14 @@ handle_info({'$gen_event', {xmlstreamstart, Name, Attrs}},
     El = #xmlel{name = Name, attrs = Attrs},
     noreply(
       try xmpp:decode(El, XMLNS, []) of
-	  #stream_start{version =  Version } = Pkt ->
+	  #stream_start{version =  {1,0} } = Pkt ->
 	      State1 = send_header(State, Pkt),
 	      case is_disconnected(State1) of
 		      true -> State1;
-              false when (Version == {1,1}) -> process_stream_start_v2(Pkt, State1, Attrs);
 		      false -> process_stream(Pkt, State1)
 	      end;
+      #stream_start{version =  {1,1} } = Pkt ->
+	      process_stream_start_v2(Pkt, State, Attrs);
 	  _ ->
 	      State1 = send_header(State),
 	      case is_disconnected(State1) of
@@ -598,7 +599,15 @@ process_stream_start_v2_bind(State, Res) ->
         State2 = State1#{stream_state => established,
                  stream_timeout => infinity},
         EnableEl = #sm_enable{resume = true, xmlns = ?NS_STREAM_MGMT_3},
-        process_authenticated_packet(EnableEl, State2);
+        State3 = process_authenticated_packet(EnableEl, State2),
+        #{jid := JID, lang := Lang} = State3,
+        PresenceEl =
+            #presence{id = <<>>, type = available, lang = Lang,
+                      from = JID, to = jid:remove_resource(JID),
+                      show = undefined, status = [], priority = 5,
+                      sub_els = [],
+                      meta = #{}},
+        process_authenticated_packet(PresenceEl, State3);
     {error, #stanza_error{} = Err, State1} ->
         process_stream_start_v2_error(State1, Err)
     end.
