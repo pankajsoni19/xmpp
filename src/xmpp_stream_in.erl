@@ -346,7 +346,7 @@ handle_info({'$gen_event', {xmlstreamstart, Name, Attrs}},
 	      State1 = send_header(State, Pkt),
 	      case is_disconnected(State1) of
 		      true -> State1;
-		      false -> process_stream_start_v2(Pkt, State1, Attrs);
+		      false -> process_stream_start_v2(Pkt, State1, Attrs)
 	      end;
       #stream_start{version =  {1,2} } = Pkt ->
 	      process_stream_start_v2(Pkt, State, Attrs);
