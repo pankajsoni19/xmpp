@@ -117,7 +117,6 @@ server_start(State, Mech, ClientIn) ->
 server_step(State, ClientIn) ->
     Module = get_mod(State#sasl_state.mech_name),
     MechState = State#sasl_state.mech_state,
-    io:format("ClientIn~p~n", [{State, ClientIn, Module:mech_step(MechState, ClientIn)}]),
     case Module:mech_step(MechState, ClientIn) of
         {ok, Props} ->
             case check_credentials(Props) of
