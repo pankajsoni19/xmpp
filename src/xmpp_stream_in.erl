@@ -52,7 +52,6 @@
 		   stream_id => binary(),
 		   stream_header_sent => boolean(),
 		   stream_restarted => boolean(),
-		   stream_compressed => boolean(),
 		   stream_encrypted => boolean(),
 		   stream_version => {non_neg_integer(), non_neg_integer()},
 		   stream_authenticated => boolean(),
@@ -69,11 +68,10 @@
 		   sasl_state => xmpp_sasl:sasl_state(),
 		   _ => _}.
 -type stream_state() :: accepting | wait_for_stream | wait_for_handshake |
-			wait_for_starttls | wait_for_sasl_request |
+            wait_for_sasl_request |
 			wait_for_sasl_response | wait_for_bind |
 			established | disconnected.
 -type stop_reason() :: {stream, reset | {in | out, stream_error()}} |
-		       {tls, inet:posix() | atom() | binary()} |
 		       {socket, inet:posix() | atom()} |
 		       internal_failure.
 -type noreply() :: {noreply, state(), timeout()}.
@@ -102,10 +100,6 @@
 -callback check_password_fun(xmpp_sasl:mechanism(), state()) -> fun().
 -callback check_password_digest_fun(xmpp_sasl:mechanism(), state()) -> fun().
 -callback bind(binary(), state()) -> {ok, state()} | {error, stanza_error(), state()}.
--callback compress_methods(state()) -> [binary()].
--callback tls_options(state()) -> [proplists:property()].
--callback tls_required(state()) -> boolean().
--callback tls_enabled(state()) -> boolean().
 -callback sasl_mechanisms([xmpp_sasl:mechanism()], state()) -> [xmpp_sasl:mechanism()].
 -callback unauthenticated_stream_features(state()) -> [xmpp_element()].
 -callback authenticated_stream_features(state()) -> [xmpp_element()].
@@ -134,10 +128,6 @@
 		     check_password_fun/2,
 		     check_password_digest_fun/2,
 		     bind/2,
-		     compress_methods/1,
-		     tls_options/1,
-		     tls_required/1,
-		     tls_enabled/1,
 		     sasl_mechanisms/2,
 		     unauthenticated_stream_features/1,
 		     authenticated_stream_features/1]).
@@ -253,8 +243,6 @@ format_error({stream, {in, #stream_error{} = Err}}) ->
     format("Stream closed by peer: ~s", [xmpp:format_stream_error(Err)]);
 format_error({stream, {out, #stream_error{} = Err}}) ->
     format("Stream closed by local host: ~s", [xmpp:format_stream_error(Err)]);
-format_error({tls, Reason}) ->
-    format("TLS failed: ~s", [format_tls_error(Reason)]);
 format_error(internal_failure) ->
     <<"Internal server error">>;
 format_error(Err) ->
@@ -280,10 +268,8 @@ handle_cast(accept, #{mod := Mod,
                       socket_mod := SockMod,
                       socket_opts := Opts} = StateE) ->
     {ok, Socket} =
-        if (SockMod == ranch_tcp) orelse (SockMod == ranch_ssl) ->
-               ranch:handshake(Mod);
-           true ->
-               SockMod:handshake()
+        if (SockMod == ranch_tcp) -> ranch:handshake(Mod);
+           true -> SockMod:handshake()
         end,
     State = StateE#{socket => Socket},
     XMPPSocket = xmpp_socket:new(SockMod, Socket, Opts),
@@ -437,10 +423,8 @@ handle_info({tcp, _, Data}, #{socket := Socket} = State) ->
       case xmpp_socket:recv(Socket, Data) of
 	  {ok, NewSocket} ->
 	      State#{socket => NewSocket};
-	  {error, Reason} when is_atom(Reason) ->
-	      process_stream_end({socket, Reason}, State);
 	  {error, Reason} ->
-	      process_stream_end({tls, Reason}, State)
+	      process_stream_end({socket, Reason}, State)
       end);
 handle_info({tcp_closed, _}, State) ->
     handle_info({'$gen_event', closed}, State);
@@ -480,8 +464,6 @@ init_state(#{mod := Mod} = State, Opts) ->
 		    stream_state => wait_for_stream,
 		    stream_header_sent => false,
 		    stream_restarted => false,
-		    stream_compressed => false,
-		    stream_encrypted => false,
 		    stream_version => {1,0},
 		    stream_authenticated => false,
 		    codec_options => [ignore_els],
@@ -529,11 +511,6 @@ process_invalid_xml(#{lang := MyLang} = State, El, Reason) ->
 		    Txt = xmpp:io_format_error(Reason),
 		    Err = #sasl_failure{reason = 'malformed-request',
 					text = xmpp:mk_text(Txt, MyLang)},
-		    send_pkt(State, Err);
-		{<<"starttls">>, ?NS_TLS} ->
-		    send_pkt(State, #starttls_failure{});
-		{<<"compress">>, ?NS_COMPRESS} ->
-		    Err = #compress_failure{reason = 'setup-failed'},
 		    send_pkt(State, Err);
 		_ ->
 		    %% Maybe add something more?
@@ -676,8 +653,7 @@ process_stream(#stream_start{to = #jid{server = Server, lserver = LServer},
 			     from = From} = StreamStart,
 	       #{stream_authenticated := Authenticated,
 		 stream_restarted := StreamWasRestarted,
-		 xmlns := NS, resource := Resource,
-		 stream_encrypted := Encrypted} = State) ->
+		 xmlns := NS, resource := Resource} = State) ->
     State1 = if not StreamWasRestarted ->
 		     State#{server => Server, lserver => LServer};
 		true ->
@@ -699,10 +675,7 @@ process_stream(#stream_start{to = #jid{server = Server, lserver = LServer},
 	    case is_disconnected(State4) of
 		true -> State4;
 		false ->
-		    TLSRequired = is_starttls_required(State4),
-		    if not Authenticated and (TLSRequired and not Encrypted) ->
-			    State4#{stream_state => wait_for_starttls};
-		       not Authenticated ->
+		    if not Authenticated ->
 			    State4#{stream_state => wait_for_sasl_request};
 		       (NS == ?NS_CLIENT) and (Resource == <<"">>) ->
 			    State4#{stream_state => wait_for_bind};
@@ -715,13 +688,6 @@ process_stream(#stream_start{to = #jid{server = Server, lserver = LServer},
 -spec process_element(xmpp_element(), state()) -> state().
 process_element(Pkt, #{stream_state := StateName, lang := Lang} = State) ->
     case Pkt of
-	#starttls{} when StateName == wait_for_starttls;
-			 StateName == wait_for_sasl_request ->
-	    process_starttls(State);
-	#starttls{} ->
-	    process_starttls_failure(unexpected_starttls_request, State);
-	#sasl_auth{} when StateName == wait_for_starttls ->
-	    send_pkt(State, #sasl_failure{reason = 'encryption-required'});
 	#sasl_auth{} when StateName == wait_for_sasl_request ->
 	    process_sasl_request(Pkt, State);
 	#sasl_auth{} when StateName == wait_for_sasl_response ->
@@ -730,8 +696,6 @@ process_element(Pkt, #{stream_state := StateName, lang := Lang} = State) ->
 	    Txt = <<"SASL negotiation is not allowed in this state">>,
 	    send_pkt(State, #sasl_failure{reason = 'not-authorized',
 					      text = xmpp:mk_text(Txt, Lang)});
-	#sasl_response{} when StateName == wait_for_starttls ->
-	    send_pkt(State, #sasl_failure{reason = 'encryption-required'});
 	#sasl_response{} when StateName == wait_for_sasl_response ->
 	    process_sasl_response(Pkt, State);
 	#sasl_response{} ->
@@ -744,8 +708,6 @@ process_element(Pkt, #{stream_state := StateName, lang := Lang} = State) ->
 	    send_pkt(State, #sasl_failure{reason = 'aborted'});
 	#sasl_success{} ->
 	    State;
-	#compress{} ->
-	    process_compress(Pkt, State);
 	#handshake{} when StateName == wait_for_handshake ->
 	    process_handshake(Pkt, State);
 	#handshake{} ->
@@ -756,10 +718,6 @@ process_element(Pkt, #{stream_state := StateName, lang := Lang} = State) ->
 	       StateName == wait_for_handshake;
 	       StateName == wait_for_sasl_response ->
 	    process_unauthenticated_packet(Pkt, State);
-	_ when StateName == wait_for_starttls ->
-	    Txt = <<"Use of STARTTLS required">>,
-	    Err = xmpp:serr_policy_violation(Txt, Lang),
-	    send_pkt(State, Err);
 	_ when StateName == wait_for_bind ->
 	    process_bind(Pkt, State);
 	_ when StateName == established ->
@@ -868,92 +826,12 @@ process_stream_established(State) ->
     catch _:{?MODULE, undef} -> State1
     end.
 
--spec process_compress(compress(), state()) -> state().
-process_compress(#compress{},
-		 #{stream_compressed := Compressed,
-		   stream_authenticated := Authenticated} = State)
-  when Compressed or not Authenticated ->
-    send_pkt(State, #compress_failure{reason = 'setup-failed'});
-process_compress(#compress{methods = HisMethods},
-		 #{socket := Socket} = State) ->
-    MyMethods = try callback(compress_methods, State)
-		catch _:{?MODULE, undef} -> []
-		end,
-    CommonMethods = lists_intersection(MyMethods, HisMethods),
-    case lists:member(<<"zlib">>, CommonMethods) of
-	true ->
-	    case xmpp_socket:compress(Socket) of
-		{ok, ZlibSocket} ->
-		    State1 = send_pkt(State, #compressed{}),
-		    case is_disconnected(State1) of
-			true -> State1;
-			false ->
-			    State1#{socket => ZlibSocket,
-				    stream_id => xmpp_stream:new_id(),
-				    stream_header_sent => false,
-				    stream_restarted => true,
-				    stream_state => wait_for_stream,
-				    stream_compressed => true}
-		    end;
-		{error, _} ->
-		    Err = #compress_failure{reason = 'setup-failed'},
-		    send_pkt(State, Err)
-	    end;
-	false ->
-	    send_pkt(State, #compress_failure{reason = 'unsupported-method'})
-    end.
-
--spec process_starttls(state()) -> state().
-process_starttls(#{stream_encrypted := true} = State) ->
-    process_starttls_failure(already_encrypted, State);
-process_starttls(#{socket := Socket} = State) ->
-    case is_starttls_available(State) of
-	true ->
-	    TLSOpts = try callback(tls_options, State)
-		      catch _:{?MODULE, undef} -> []
-		      end,
-	    case xmpp_socket:starttls(Socket, TLSOpts) of
-		{ok, TLSSocket} ->
-		    State1 = send_pkt(State, #starttls_proceed{}),
-		    case is_disconnected(State1) of
-			true -> State1;
-			false ->
-			    State1#{socket => TLSSocket,
-				    stream_id => xmpp_stream:new_id(),
-				    stream_header_sent => false,
-				    stream_restarted => true,
-				    stream_state => wait_for_stream,
-				    stream_encrypted => true}
-		    end;
-		{error, Reason} ->
-		    process_starttls_failure(Reason, State)
-	    end;
-	false ->
-	    process_starttls_failure(starttls_unsupported, State)
-    end.
-
--spec process_starttls_failure(term(), state()) -> state().
-process_starttls_failure(Why, State) ->
-    State1 = send_pkt(State, #starttls_failure{}),
-    case is_disconnected(State1) of
-	true -> State1;
-	false -> process_stream_end({tls, Why}, State1)
-    end.
-
 -spec process_sasl_request(sasl_auth(), state()) -> state().
 process_sasl_request(#sasl_auth{mechanism = Mech, text = ClientIn},
 		     #{lserver := LServer} = State) ->
     State1 = State#{sasl_mech => Mech},
     Mechs = get_sasl_mechanisms(State1),
     case lists:member(Mech, Mechs) of
-	true when Mech == <<"EXTERNAL">> ->
-	    Res = case xmpp_stream_pkix:authenticate(State1, ClientIn) of
-		      {ok, Peer} ->
-			  {ok, [{auth_module, pkix}, {username, Peer}]};
-		      {error, Reason, Peer} ->
-			  {error, Reason, Peer}
-		  end,
-	    process_sasl_result(Res, State1);
 	true ->
 	    GetPW = get_password_fun(Mech, State1),
 	    CheckPW = check_password_fun(Mech, State1),
@@ -1045,7 +923,6 @@ process_sasl_abort(State) ->
 -spec send_features(state()) -> state().
 send_features(#{stream_version := {1,0} } = State) ->
     Features = get_sasl_feature(State)
-                ++ get_compress_feature(State)
                 ++ get_bind_feature(State)
                 ++ get_session_feature(State)
                 ++ get_other_features(State),
@@ -1089,18 +966,6 @@ get_sasl_feature(#{stream_authenticated := false} = State) ->
 get_sasl_feature(_) ->
     [].
 
--spec get_compress_feature(state()) -> [compression()].
-get_compress_feature(#{stream_compressed := false,
-		       stream_authenticated := true} = State) ->
-    try callback(compress_methods, State) of
-	[] -> [];
-	Ms -> [#compression{methods = Ms}]
-    catch _:{?MODULE, undef} ->
-	    []
-    end;
-get_compress_feature(_) ->
-    [].
-
 -spec get_bind_feature(state()) -> [bind()].
 get_bind_feature(#{xmlns := ?NS_CLIENT,
 		   stream_authenticated := true,
@@ -1126,15 +991,6 @@ get_other_features(#{stream_authenticated := Auth} = State) ->
     catch _:{?MODULE, undef} ->
 	    []
     end.
-
--spec is_starttls_available(state()) -> boolean().
-is_starttls_available(State) ->
-    try callback(tls_enabled, State)
-    catch _:{?MODULE, undef} -> true
-    end.
-
--spec is_starttls_required(state()) -> boolean().
-is_starttls_required(_State) -> false.
 
 -spec set_from_to(xmpp_element(), state()) -> {ok, xmpp_element()} |
 					      {error, stream_error()}.
@@ -1299,16 +1155,8 @@ format_inet_error(Reason) ->
     end.
 
 -spec format_sasl_error(xmpp_sasl:mechanism(), atom()) -> {atom(), binary()}.
-format_sasl_error(<<"EXTERNAL">>, Err) ->
-    xmpp_stream_pkix:format_error(Err);
 format_sasl_error(Mech, Err) ->
     xmpp_sasl:format_error(Mech, Err).
-
--spec format_tls_error(atom() | binary()) -> list().
-format_tls_error(Reason) when is_atom(Reason) ->
-    format_inet_error(Reason);
-format_tls_error(Reason) ->
-    Reason.
 
 -spec format(io:format(), list()) -> binary().
 format(Fmt, Args) ->

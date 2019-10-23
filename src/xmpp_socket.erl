@@ -24,9 +24,6 @@
 	 connect/3,
 	 connect/4,
 	 connect/5,
-	 starttls/2,
-	 compress/1,
-	 compress/2,
 	 reset_stream/1,
 	 send_element/2,
 	 send_header/2,
@@ -39,8 +36,6 @@
 	 monitor/1,
 	 get_sockmod/1,
 	 get_transport/1,
-	 get_peer_certificate/2,
-	 get_verify_result/1,
 	 close/1,
 	 pp/1,
 	 sockname/1,
@@ -49,9 +44,8 @@
 
 -include("xmpp.hrl").
 
--type sockmod() :: gen_tcp | fast_tls | ezlib | ext_mod().
--type socket() :: inet:socket() | fast_tls:tls_socket() |
-		  ezlib:zlib_socket() | ext_socket().
+-type sockmod() :: gen_tcp | ext_mod().
+-type socket() :: inet:socket() | ext_socket().
 -type ext_mod() :: module().
 -type ext_socket() :: any().
 -type endpoint() :: {inet:ip_address(), inet:port_number()}.
@@ -128,50 +122,6 @@ connect(Addr, Port, Opts, Timeout, Owner) ->
 	    Error
     end.
 
--spec starttls(socket_state(), [proplists:property()]) ->
-		      {ok, socket_state()} |
-		      {error, inet:posix() | atom() | binary()}.
-starttls(#socket_state{sockmod = gen_tcp,
-		       socket = Socket} = SocketData, TLSOpts) ->
-    case fast_tls:tcp_to_tls(Socket, TLSOpts) of
-	{ok, TLSSocket} ->
-	    SocketData1 = SocketData#socket_state{socket = TLSSocket,
-						  sockmod = fast_tls},
-	    SocketData2 = reset_stream(SocketData1),
-	    case fast_tls:recv_data(TLSSocket, <<>>) of
-		{ok, TLSData} ->
-		    parse(SocketData2, TLSData);
-		{error, _} = Err ->
-		    Err
-	    end;
-	{error, _} = Err ->
-	    Err
-    end;
-starttls(_, _) ->
-    erlang:error(badarg).
-
-compress(SocketData) -> compress(SocketData, undefined).
-
-compress(#socket_state{sockmod = SockMod,
-		       socket = Socket} = SocketData, Data)
-  when SockMod == ranch_tcp orelse SockMod == ranch_ssl ->
-    {ok, ZlibSocket} = ezlib:enable_zlib(SockMod, Socket),
-    case Data of
-	undefined -> ok;
-	_ -> send(SocketData, Data)
-    end,
-    SocketData1 = SocketData#socket_state{socket = ZlibSocket,
-					  sockmod = ezlib},
-    SocketData2 = reset_stream(SocketData1),
-    case ezlib:recv_data(ZlibSocket, <<"">>) of
-	{ok, ZlibData} ->
-	    parse(SocketData2, ZlibData);
-	{error, _} = Err ->
-	    Err
-    end;
-compress(_, _) ->
-    erlang:error(badarg).
-
 reset_stream(#socket_state{xml_stream = XMLStream,
 			   sockmod = SockMod, socket = Socket,
 			   max_stanza_size = MaxStanzaSize} = SocketData) ->
@@ -241,25 +191,7 @@ stringify_stream_element({xmlstreamerror, Data}) ->
 stringify_stream_element({xmlstreamraw, Data}) ->
     Data.
 
-recv(#socket_state{sockmod = SockMod, socket = Socket} = SocketData, Data) ->
-    case SockMod of
-	fast_tls ->
-	    case fast_tls:recv_data(Socket, Data) of
-		{ok, TLSData} ->
-		    parse(SocketData, TLSData);
-		{error, _} = Err ->
-		    Err
-	    end;
-	ezlib ->
-	    case ezlib:recv_data(Socket, Data) of
-		{ok, ZlibData} ->
-		    parse(SocketData, ZlibData);
-		{error, _} = Err ->
-		    Err
-	    end;
-	_ ->
-	    parse(SocketData, Data)
-    end.
+recv(SocketData, Data) -> parse(SocketData, Data).
 
 -spec change_shaper(socket_state(), none | p1_shaper:state()) -> socket_state().
 change_shaper(#socket_state{xml_stream = XMLStream,
@@ -285,74 +217,30 @@ controlling_process(#socket_state{sockmod = SockMod,
 get_sockmod(SocketData) ->
     SocketData#socket_state.sockmod.
 
-get_transport(#socket_state{sockmod = SockMod,
-			    socket = Socket}) ->
-    case SockMod of
-        ranch_tcp -> tcp;
-        ranch_ssl -> tls;
-	gen_tcp -> tcp;
-	fast_tls -> tls;
-	ezlib ->
-	    case ezlib:get_sockmod(Socket) of
-                ranch_tcp -> tcp_zlib;
-                ranch_ssl -> tls_zlib;
-		gen_tcp -> tcp_zlib;
-		fast_tls -> tls_zlib
-	    end;
-	_ -> SockMod:get_transport(Socket)
-    end.
+get_transport(#socket_state{sockmod = ranch_tcp}) -> tcp;
+get_transport(#socket_state{sockmod = SockMod, socket = Socket}) ->
+    SockMod:get_transport(Socket).
 
-get_owner(SockMod, _) when SockMod == gen_tcp orelse
-			   SockMod == fast_tls orelse
-                           SockMod == ranch_tcp orelse
-                           SockMod == ranch_ssl orelse
-			   SockMod == ezlib ->
-    self();
-get_owner(SockMod, Socket) ->
-    SockMod:get_owner(Socket).
-
-get_peer_certificate(SocketData, Type) ->
-    fast_tls:get_peer_certificate(SocketData#socket_state.socket, Type).
-
-get_verify_result(SocketData) ->
-    fast_tls:get_verify_result(SocketData#socket_state.socket).
+get_owner(ranch_tcp, _) ->  self();
+get_owner(SockMod, Socket) -> SockMod:get_owner(Socket).
 
 close(#socket_state{sockmod = SockMod, socket = Socket}) ->
     SockMod:close(Socket).
 
 -spec sockname(socket_state()) -> {ok, endpoint()} | {error, inet:posix()}.
-sockname(#socket_state{sockmod = SockMod,
-		       socket = Socket,
-		       sock_peer_name = SockPeer}) ->
-    case SockPeer of
-	none ->
-	    case SockMod of
-		gen_tcp -> inet:sockname(Socket);
-		_ -> SockMod:sockname(Socket)
-	    end;
-	{SN, _} ->
-	    {ok, SN}
-    end.
+sockname(#socket_state{sock_peer_name = {SN, _}}) ->
+    {ok, SN};
+sockname(#socket_state{sockmod = SockMod, socket = Socket}) ->
+    SockMod:sockname(Socket).
 
 -spec peername(socket_state()) -> {ok, endpoint()} | {error, inet:posix()}.
-peername(#socket_state{sockmod = SockMod,
-		       socket = Socket,
-		       sock_peer_name = SockPeer}) ->
-    case SockPeer of
-	none ->
-	    case SockMod of
-		gen_tcp -> inet:peername(Socket);
-		_ -> SockMod:peername(Socket)
-	    end;
-	{_, PN} ->
-	    {ok, PN}
-    end.
+peername(#socket_state{sock_peer_name = {_, PN}}) ->
+    {ok, PN};
+peername(#socket_state{sockmod = SockMod, socket = Socket}) ->
+    SockMod:peername(Socket).
 
 activate(#socket_state{sockmod = SockMod, socket = Socket}) ->
-    case SockMod of
-	gen_tcp -> inet:setopts(Socket, [{active, once}]);
-	_ -> SockMod:setopts(Socket, [{active, once}])
-    end.
+    SockMod:setopts(Socket, [{active, once}]).
 
 activate_after(Socket, Pid, Pause) ->
     if Pause > 0 ->

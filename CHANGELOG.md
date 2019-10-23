@@ -1,3 +1,9 @@
+# Version 2.0.0
+
+* Use ranch, cowboy
+* remove ezlib, fast_tls dependency
+* cleaner connection negotiation
+
 # Version 1.3.4
 
 * Updating ezlib to version 1.0.6.

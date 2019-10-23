@@ -1,4 +1,8 @@
 c_src/*.o
+src/XmppAddr.asn1db
+include/XmppAddr.asn1db
+include/XmppAddr.hrl
+src/XmppAddr.erl
 deps/
 ebin/
 priv/
