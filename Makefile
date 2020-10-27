@@ -16,8 +16,8 @@ xdata: ebin/xdata_codec.beam
 
 clean:
 	$(REBAR) clean
-	rm -rf deps
-	rm -rf ebin
+# 	rm -rf deps
+# 	rm -rf ebin
 
 xref: all
 	$(REBAR) skip_deps=true xref
